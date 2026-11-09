@@ -264,7 +264,7 @@ function viewFor(pid){
   return {
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, round: G.round,
     players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place, ready: G.coins[p.pid] !== undefined })),
-    myCoins: G.coins[pid], order: G.order, guesses: G.guesses, range: range(),
+    myCoins: G.coins[pid] ?? null, order: G.order, guesses: G.guesses, range: range(),
     starter: G.players[G.starter]?.pid, result: G.result, loser: G.loser
   };
 }
@@ -392,7 +392,7 @@ function coinsPhase(v, me){
   if (!me || me.out) body = `<p class="center">Estás safo 🎉 — a assistir.</p>`;
   else {
     const min = v.round === 1 ? 1 : 0;
-    body = `<p class="center">${v.myCoins === undefined ? 'Quantas moedas levas?' : `Levas <b>${v.myCoins}</b> 🪙 — podes mudar até todos escolherem.`}</p>
+    body = `<p class="center">${v.myCoins == null ? 'Selecciona a quantidade de moedas que levas.' : `Levas <b>${v.myCoins}</b> 🪙 — podes mudar até todos escolherem.`}</p>
       <div class="coins">${[0,1,2,3].map(n => `<button class="coin ${v.myCoins === n ? 'sel' : ''}" data-a="coins" data-n="${n}" ${n < min ? 'disabled' : ''}>${n}</button>`).join('')}</div>
       ${v.round === 1 ? '<p class="muted center" style="font-size:13px">1.ª ronda: obrigatório levar pelo menos 1.</p>' : ''}`;
   }
@@ -407,7 +407,7 @@ function guessPhase(v, me){
     pick = `<p class="center"><b>É a tua vez!</b> Levas ${v.myCoins} 🪙. Quantas há no total?</p>
       <div class="nums">${nums.map(n => `<button class="${said.has(n) ? 'sec' : ''}" data-a="guess" data-n="${n}" ${said.has(n) ? 'disabled' : ''}>${n}</button>`).join('')}</div><div class="gap"></div>`;
   } else {
-    pick = `<p class="center">Vez de <b>${nameOf(turn)}</b>${me && !me.out && v.myCoins !== undefined ? ` · levas ${v.myCoins} 🪙` : ''}</p>`;
+    pick = `<p class="center">Vez de <b>${nameOf(turn)}</b>${me && !me.out && v.myCoins != null ? ` · levas ${v.myCoins} 🪙` : ''}</p>`;
   }
   const rows = v.order.map((pid, i) => {
     const g = v.guesses[i];
