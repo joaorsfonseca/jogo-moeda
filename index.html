@@ -141,7 +141,7 @@ function startHost(resume){
   if (resume) { G = resume; G.players.forEach(p => p.connected = p.pid === myPid); }
   else {
     G = { code: newCode(), phase: 'lobby', round: 0, starter: 0, coins: {}, guesses: [], order: [],
-          result: null, loser: null, players: [{ pid: myPid, name: myName, connected: true, out: false, place: null }] };
+          result: null, loser: null, firstStarter: myPid, players: [{ pid: myPid, name: myName, connected: true, out: false, place: null }] };
   }
   code = G.code; keepAwake(); openHostPeer(); changed();
 }
@@ -212,7 +212,10 @@ function act(pid, d){
     }
     case 'start':
       if (!isHost || G.phase !== 'lobby' || G.players.length < 2) return;
-      G.round = 1; G.starter = Math.floor(Math.random() * G.players.length); newRound(); break;
+      G.round = 1; G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); newRound(); break;
+    case 'first':
+      if (!isHost || G.phase !== 'lobby' || !pl(d.pid)) return;
+      G.firstStarter = d.pid; break;
     case 'next':
       if (!isHost || G.phase !== 'reveal') return;
       G.round++; G.starter = nextActiveIdx(G.starter); newRound(); break;
@@ -258,6 +261,7 @@ function kick(pid){
   G.players.splice(idx, 1);
   if (idx < G.starter) G.starter--;
   if (G.starter >= G.players.length) G.starter = 0;
+  if (G.firstStarter === pid) G.firstStarter = G.players[0]?.pid;
   delete G.coins[pid];
   G.order = G.order.filter(x => x !== pid);
   G.guesses = G.guesses.filter(g => g.pid !== pid);
@@ -273,7 +277,7 @@ function viewFor(pid){
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, round: G.round,
     players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place, ready: G.coins[p.pid] !== undefined })),
     myCoins: G.coins[pid] ?? null, order: G.order, guesses: G.guesses, range: range(),
-    starter: G.players[G.starter]?.pid, result: G.result, loser: G.loser
+    starter: G.phase === 'lobby' ? (pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid) : G.players[G.starter]?.pid, result: G.result, loser: G.loser
   };
 }
 function changed(){
@@ -351,6 +355,7 @@ function render(){
   bindTop();
   app.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
     const a = b.dataset.a, n = b.dataset.n !== undefined ? Number(b.dataset.n) : undefined;
+    if (a === 'first') { send({ t: 'first', pid: b.dataset.pid }); return; }
     if (a === 'move') { send({ t: 'move', pid: b.dataset.pid, n }); return; }
     if (a === 'kick') { if (confirm('Remover ' + b.dataset.name + '?')) send({ t: 'kick', pid: b.dataset.pid }); return; }
     send({ t: a, n });
@@ -393,7 +398,8 @@ function lobby(v, isHost){
     <div class="big" style="letter-spacing:8px">${esc(v.code)}</div>
     <p class="muted">${v.players.length} jogador${v.players.length === 1 ? '' : 'es'} na sala</p>
     ${isHost ? `<button data-a="start" ${v.players.length < 2 ? 'disabled' : ''}>Começar jogo</button>`
-             : `<p>À espera que o anfitrião comece…</p>`}</div>`;
+             : `<p>À espera que o anfitrião comece…</p>`}
+    <p class="muted" style="margin:8px 0 0">Começa a 1.ª ronda: <b>${nameOf(v.starter)}</b>${isHost ? ' · toca em ▶ na lista para mudar' : ''}</p></div>`;
 }
 function coinsPhase(v, me){
   const act = v.players.filter(p => !p.out), ready = act.filter(p => p.ready).length;
@@ -452,11 +458,13 @@ function playersCard(v, isHost){
     else if (p.out) tag = `<span class="tag ok">safo #${p.place}</span>`;
     else if (v.phase === 'coins') tag = p.ready ? '<span class="tag ok">pronto</span>' : '<span class="tag">a escolher</span>';
     else if (inGame) tag = '<span class="tag gold">em jogo</span>';
+    if (!inGame && p.pid === v.starter) tag = '<span class="tag gold">começa</span>';
     if (p.pid === v.hostPid) tag = '<span class="tag">anfitrião</span> ' + tag;
     const kick = isHost && p.pid !== v.me ? `<button class="small sec" data-a="kick" data-pid="${esc(p.pid)}" data-name="${esc(p.name)}">✕</button>` : '';
+    const first = isHost && !inGame && p.pid !== v.starter ? `<button class="small sec" data-a="first" data-pid="${esc(p.pid)}" aria-label="Começa a 1.ª ronda">▶</button>` : '';
     const move = canOrder ? `<button class="small sec" data-a="move" data-pid="${esc(p.pid)}" data-n="-1" ${i === 0 ? 'disabled' : ''} aria-label="Subir">▲</button>`
       + `<button class="small sec" data-a="move" data-pid="${esc(p.pid)}" data-n="1" ${i === v.players.length - 1 ? 'disabled' : ''} aria-label="Descer">▼</button>` : '';
-    return `<li><span class="seat">${i + 1}</span><span class="dot ${p.connected ? '' : 'off'}"></span><span class="nm">${esc(p.name)}${p.pid === v.me ? ' (tu)' : ''}</span>${tag}${move}${kick}</li>`;
+    return `<li><span class="seat">${i + 1}</span><span class="dot ${p.connected ? '' : 'off'}"></span><span class="nm">${esc(p.name)}${p.pid === v.me ? ' (tu)' : ''}</span>${tag}${first}${move}${kick}</li>`;
   }).join('');
   const hint = canOrder ? '<p class="muted" style="margin:0 0 8px;font-size:14px">Ordena pelos lugares à mesa (no sentido dos ponteiros do relógio). As rondas seguem esta ordem.</p>' : '';
   return `<div class="card"><h2>Mesa (${v.players.length})</h2>${hint}<ul class="players">${items}</ul></div>`;
