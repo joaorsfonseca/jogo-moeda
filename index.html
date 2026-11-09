@@ -50,6 +50,8 @@
   .tag.red{background:#5a1f1a;color:#ffb3aa}
   .seat{width:22px;text-align:right;color:var(--muted);font-size:13px;flex:none}
   .players li .small{padding:6px 9px}
+  .picks{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px}
+  .picks button{padding:10px 6px;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
   .dot.off{background:var(--red)}
   .coins{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
@@ -117,6 +119,7 @@ let peer = null, hostConn = null, view = null, code = null, statusMsg = '';
 let G = null;             // estado autoritativo (só no anfitrião)
 const conns = new Map();  // pid -> DataConnection (anfitrião)
 let wakeLock = null;
+let restartPick = null;   // escolha local do anfitrião no ecrã de fim de jogo
 
 function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('on');
   clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('on'), 2600); }
@@ -222,7 +225,12 @@ function act(pid, d){
     case 'restart':
       if (!isHost || G.phase !== 'over') return;
       G.players.forEach(x => { x.out = false; x.place = null; });
-      Object.assign(G, { phase: 'lobby', round: 0, coins: {}, guesses: [], order: [], result: null, loser: null }); break;
+      Object.assign(G, { phase: 'lobby', round: 0, coins: {}, guesses: [], order: [], result: null, loser: null });
+      if (d.pid && pl(d.pid)) G.firstStarter = d.pid;
+      if (!d.lobby && G.players.length >= 2) { // recomeça já, mesma ordem da mesa
+        G.round = 1; G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); newRound();
+      }
+      break;
     case 'move': {
       if (!isHost || G.phase !== 'lobby') return;
       const i = G.players.findIndex(x => x.pid === d.pid), j = i + (d.n < 0 ? -1 : 1);
@@ -277,6 +285,7 @@ function viewFor(pid){
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, round: G.round,
     players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place, ready: G.coins[p.pid] !== undefined })),
     myCoins: G.coins[pid] ?? null, order: G.order, guesses: G.guesses, range: range(),
+    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid,
     starter: G.phase === 'lobby' ? (pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid) : G.players[G.starter]?.pid, result: G.result, loser: G.loser
   };
 }
@@ -358,6 +367,8 @@ function render(){
     if (a === 'first') { send({ t: 'first', pid: b.dataset.pid }); return; }
     if (a === 'move') { send({ t: 'move', pid: b.dataset.pid, n }); return; }
     if (a === 'kick') { if (confirm('Remover ' + b.dataset.name + '?')) send({ t: 'kick', pid: b.dataset.pid }); return; }
+    if (a === 'pick') { restartPick = b.dataset.pid; render(); return; }
+    if (a === 'restart') { send({ t: 'restart', pid: restartPick, lobby: b.dataset.lobby === '1' }); restartPick = null; return; }
     send({ t: a, n });
   });
 }
@@ -448,7 +459,16 @@ function overPhase(v, isHost){
   return `<div class="card center"><h2>Fim do jogo</h2><div style="font-size:48px">💸</div>
     <p style="font-size:22px;margin:6px 0">${v.loser ? (v.loser === v.me ? '<b>Pagas tu!</b>' : `<b>${nameOf(v.loser)}</b> paga!`) : 'Jogo terminado.'}</p></div>
     ${r ? `<div class="card"><h2>Última ronda · total ${r.total}</h2>${resultTable(r)}</div>` : ''}
-    ${isHost ? '<button data-a="restart">Novo jogo (mesma mesa)</button>' : '<p class="muted center">O anfitrião pode iniciar um novo jogo.</p>'}`;
+    ${isHost ? restartCard(v) : '<p class="muted center">À espera que o anfitrião recomece o jogo…</p>'}`;
+}
+function restartCard(v){
+  if (!v.players.some(p => p.pid === restartPick)) restartPick = v.firstStarter;
+  const chips = v.players.map(p => `<button class="${p.pid === restartPick ? '' : 'sec'}" data-a="pick" data-pid="${esc(p.pid)}">${esc(p.name)}</button>`).join('');
+  return `<div class="card"><h2>Novo jogo · quem começa?</h2>
+    <p class="muted" style="margin:0 0 10px;font-size:14px">A ordem da mesa mantém-se.</p>
+    <div class="picks">${chips}</div><div class="gap"></div>
+    <button data-a="restart" ${v.players.length < 2 ? 'disabled' : ''}>Recomeçar · começa ${nameOf(restartPick)}</button><div class="gap"></div>
+    <button class="sec" data-a="restart" data-lobby="1">Voltar à sala de espera (entrar / reordenar)</button></div>`;
 }
 function playersCard(v, isHost){
   const inGame = v.phase !== 'lobby', canOrder = isHost && !inGame && v.players.length > 1;
