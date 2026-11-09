@@ -48,6 +48,8 @@
   .tag.ok{background:#1f5e33;color:var(--ok)}
   .tag.gold{background:#5a4611;color:var(--gold)}
   .tag.red{background:#5a1f1a;color:#ffb3aa}
+  .seat{width:22px;text-align:right;color:var(--muted);font-size:13px;flex:none}
+  .players li .small{padding:6px 9px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
   .dot.off{background:var(--red)}
   .coins{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
@@ -218,6 +220,12 @@ function act(pid, d){
       if (!isHost || G.phase !== 'over') return;
       G.players.forEach(x => { x.out = false; x.place = null; });
       Object.assign(G, { phase: 'lobby', round: 0, coins: {}, guesses: [], order: [], result: null, loser: null }); break;
+    case 'move': {
+      if (!isHost || G.phase !== 'lobby') return;
+      const i = G.players.findIndex(x => x.pid === d.pid), j = i + (d.n < 0 ? -1 : 1);
+      if (i < 0 || j < 0 || j >= G.players.length) return;
+      [G.players[i], G.players[j]] = [G.players[j], G.players[i]]; break;
+    }
     case 'kick':
       if (!isHost || d.pid === myPid) return; kick(d.pid); break;
     default: return;
@@ -343,6 +351,7 @@ function render(){
   bindTop();
   app.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
     const a = b.dataset.a, n = b.dataset.n !== undefined ? Number(b.dataset.n) : undefined;
+    if (a === 'move') { send({ t: 'move', pid: b.dataset.pid, n }); return; }
     if (a === 'kick') { if (confirm('Remover ' + b.dataset.name + '?')) send({ t: 'kick', pid: b.dataset.pid }); return; }
     send({ t: a, n });
   });
@@ -436,8 +445,8 @@ function overPhase(v, isHost){
     ${isHost ? '<button data-a="restart">Novo jogo (mesma mesa)</button>' : '<p class="muted center">O anfitrião pode iniciar um novo jogo.</p>'}`;
 }
 function playersCard(v, isHost){
-  const inGame = v.phase !== 'lobby';
-  const items = v.players.map(p => {
+  const inGame = v.phase !== 'lobby', canOrder = isHost && !inGame && v.players.length > 1;
+  const items = v.players.map((p, i) => {
     let tag = '';
     if (p.pid === v.loser) tag = '<span class="tag red">paga</span>';
     else if (p.out) tag = `<span class="tag ok">safo #${p.place}</span>`;
@@ -445,9 +454,12 @@ function playersCard(v, isHost){
     else if (inGame) tag = '<span class="tag gold">em jogo</span>';
     if (p.pid === v.hostPid) tag = '<span class="tag">anfitrião</span> ' + tag;
     const kick = isHost && p.pid !== v.me ? `<button class="small sec" data-a="kick" data-pid="${esc(p.pid)}" data-name="${esc(p.name)}">✕</button>` : '';
-    return `<li><span class="dot ${p.connected ? '' : 'off'}"></span><span class="nm">${esc(p.name)}${p.pid === v.me ? ' (tu)' : ''}</span>${tag}${kick}</li>`;
+    const move = canOrder ? `<button class="small sec" data-a="move" data-pid="${esc(p.pid)}" data-n="-1" ${i === 0 ? 'disabled' : ''} aria-label="Subir">▲</button>`
+      + `<button class="small sec" data-a="move" data-pid="${esc(p.pid)}" data-n="1" ${i === v.players.length - 1 ? 'disabled' : ''} aria-label="Descer">▼</button>` : '';
+    return `<li><span class="seat">${i + 1}</span><span class="dot ${p.connected ? '' : 'off'}"></span><span class="nm">${esc(p.name)}${p.pid === v.me ? ' (tu)' : ''}</span>${tag}${move}${kick}</li>`;
   }).join('');
-  return `<div class="card"><h2>Mesa (${v.players.length})</h2><ul class="players">${items}</ul></div>`;
+  const hint = canOrder ? '<p class="muted" style="margin:0 0 8px;font-size:14px">Ordena pelos lugares à mesa (no sentido dos ponteiros do relógio). As rondas seguem esta ordem.</p>' : '';
+  return `<div class="card"><h2>Mesa (${v.players.length})</h2>${hint}<ul class="players">${items}</ul></div>`;
 }
 
 render();
