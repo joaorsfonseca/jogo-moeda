@@ -112,7 +112,10 @@ const LS = {
 };
 const qs = new URLSearchParams(location.search);
 // Servidor de mensagens (MQTT público sobre WebSocket seguro). Pode ser trocado com ?broker=wss://...
-const BROKER = qs.get('broker') || 'wss://broker.emqx.io:8084/mqtt';
+// Ligamo-nos a vários servidores ao mesmo tempo: basta um funcionar em todos os telemóveis.
+const BROKERS = qs.get('broker') ? qs.get('broker').split(',') : [
+  'wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt' ];
+const VERSION = 'v3 · 2026-11-09';
 const TOPIC = 'jogo-moeda-v1';
 const T = c => ({ host: `${TOPIC}/${c}/h`, info: `${TOPIC}/${c}/info`, client: pid => `${TOPIC}/${c}/c/${pid}` });
 const log = (...a) => console.log('[moeda]', ...a);
@@ -137,27 +140,38 @@ async function keepAwake(){ try { if ('wakeLock' in navigator && !wakeLock) {
 function netOk(){ if (typeof mqtt === 'undefined') { toast('Não foi possível carregar a biblioteca de rede.'); return false; } return true; }
 
 /* ======================= Rede (MQTT) ======================= */
-let mq = null;
+let mqs = [];                 // um cliente MQTT por servidor
+const seenIds = new Map();     // deduplicação (a mesma mensagem chega por vários servidores)
+let msgSeq = 0;
+const netUp = () => mqs.filter(m => m.connected).length;
+function netEnd(){ const old = mqs; mqs = []; setTimeout(() => old.forEach(m => { try { m.end(true); } catch {} }), 500); }
+function netReconnect(){ mqs.forEach(m => { if (!m.connected) { try { m.reconnect(); } catch {} } }); }
 function mqConnect(onConnect, onMessage){
-  try { mq && mq.end(true); } catch {}
-  const m = mqtt.connect(BROKER, {
-    clientId: 'moeda_' + myPid.replace(/[^a-z0-9]/gi, '').slice(0, 12) + '_' + Math.random().toString(36).slice(2, 8),
-    keepalive: 20, reconnectPeriod: 2000, connectTimeout: 10000, clean: true, resubscribe: true
+  netEnd();
+  const mine = mqs = BROKERS.map(url => {
+    const m = mqtt.connect(url, {
+      clientId: 'moeda_' + myPid.replace(/[^a-z0-9]/gi, '').slice(0, 12) + '_' + Math.random().toString(36).slice(2, 8),
+      keepalive: 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true
+    });
+    m.on('connect', () => { if (mqs !== mine) return; log('ligado a', url); if (role && netUp() === 1 && /servidor|internet/.test(statusMsg)) statusMsg = ''; onConnect(m); render(); });
+    const down = () => { if (mqs !== mine || !role) return; if (!netUp()) { statusMsg = 'Sem ligação aos servidores. A tentar…'; render(); } };
+    m.on('offline', down); m.on('close', down);
+    m.on('error', e => log('erro', url, e && e.message));
+    m.on('message', (topic, payload) => {
+      if (mqs !== mine) return;
+      const str = payload.toString(); if (!str) return onMessage(topic, null);
+      let d; try { d = JSON.parse(str); } catch { return; }
+      if (d && d._id) { if (seenIds.has(d._id)) return; seenIds.set(d._id, 1); if (seenIds.size > 800) seenIds.delete(seenIds.keys().next().value); }
+      try { onMessage(topic, d); } catch (e) { console.error(e); }
+    });
+    return m;
   });
-  mq = m;
-  m.on('connect', () => { if (mq === m) { log('mqtt connect'); onConnect(m); } });
-  m.on('reconnect', () => { if (mq === m && role) { statusMsg = 'A ligar ao servidor…'; render(); } });
-  m.on('offline', () => { if (mq === m && role) { statusMsg = 'Sem ligação à internet. A tentar…'; render(); } });
-  m.on('error', e => log('mqtt error', e && e.message));
-  m.on('message', (topic, payload) => {
-    if (mq !== m) return;
-    const s = payload.toString(); if (!s) return onMessage(topic, null);
-    let d; try { d = JSON.parse(s); } catch { return; }
-    try { onMessage(topic, d); } catch (e) { console.error(e); }
-  });
-  return m;
 }
-function pub(topic, obj, retain){ try { mq && mq.publish(topic, obj === null ? '' : JSON.stringify(obj), { qos: 1, retain: !!retain }); } catch (e) { log('pub fail', e); } }
+function pubOn(m, topic, payload, retain){ try { m.connected && m.publish(topic, payload, { qos: 1, retain: !!retain }); } catch (e) { log('pub fail', e); } }
+function pub(topic, obj, retain){
+  const payload = obj === null ? '' : JSON.stringify(retain ? obj : { ...obj, _id: myPid.slice(0, 8) + '.' + Date.now().toString(36) + '.' + (++msgSeq) });
+  mqs.forEach(m => pubOn(m, topic, payload, retain));
+}
 
 /* ======================= Anfitrião (motor do jogo) ======================= */
 const pl = pid => G.players.find(p => p.pid === pid);
@@ -180,20 +194,23 @@ function startHost(resume){
   }
   code = G.code; conns.clear(); links.clear(); keepAwake(); openHostNet(); changed();
 }
-let claimed = false, claimTimer = null, hbTimer = null;
+let claimed = false, claimTimer = null, hbTimer = null, stateSeq = 0;
+const hostSession = Math.random().toString(36).slice(2, 8);
 function openHostNet(){
-  statusMsg = 'A abrir a sala…'; render(); claimed = false;
+  statusMsg = 'A abrir a sala…'; render(); claimed = false; clearTimeout(claimTimer); claimTimer = null;
   mqConnect(m => {
-    const t = T(code); claimed = false;
+    const t = T(code);
     m.subscribe([t.host, t.info], { qos: 1 }, err => {
-      if (err) { statusMsg = 'Erro ao abrir a sala. A tentar…'; render(); return; }
-      clearTimeout(claimTimer);
+      if (err) return log('subscribe falhou');
+      if (claimed) { pubOn(m, t.info, JSON.stringify({ host: myPid, ts: Date.now() }), true); changed(); return; }
+      if (claimTimer) return;
       claimTimer = setTimeout(() => {         // ninguém reclamou este código → é nosso
+        claimTimer = null;
         if (role !== 'host') return;
         claimed = true; statusMsg = '';
         pub(t.info, { host: myPid, ts: Date.now() }, true);
         changed();
-      }, 1200);
+      }, 1500);
     });
   }, onHostMessage);
   clearInterval(hbTimer);
@@ -208,7 +225,7 @@ function onHostMessage(topic, d){
   const t = T(code);
   if (topic === t.info) {
     if (!claimed && d && d.host && d.host !== myPid) {   // código já em uso por outra mesa
-      clearTimeout(claimTimer);
+      clearTimeout(claimTimer); claimTimer = null;
       if (G.phase === 'lobby' && G.players.length === 1) { code = G.code = newCode(); log('code clash, new', code); openHostNet(); changed(); }
     }
     return;
@@ -343,12 +360,12 @@ function viewFor(pid){
 }
 function changed(){
   if (role !== 'host') return;
-  if (claimed) for (const [pid, c] of conns) sendTo(c.topic, { t: 'state', v: viewFor(pid) });
+  if (claimed) for (const [pid, c] of conns) sendTo(c.topic, { t: 'state', seq: ++stateSeq, hs: hostSession, v: viewFor(pid) });
   view = viewFor(myPid); LS.set('host', G); render();
 }
 
 /* ======================= Cliente ======================= */
-let hostKnown = false, helloAt = 0, lastHost = 0, pingTimer = null;
+let hostKnown = false, helloAt = 0, lastHost = 0, pingTimer = null, lastHs = null, lastSeq = 0;
 function joinGame(c){
   if (!netOk()) return;
   role = 'client'; code = c; view = null; hostKnown = false; lastHost = 0;
@@ -363,7 +380,7 @@ function joinGame(c){
 function sayHello(){ helloAt = Date.now(); pub(T(code).host, { t: 'hello', from: myPid, name: myName }); }
 function clientTick(){
   if (role !== 'client') return clearInterval(pingTimer);
-  if (!mq || !mq.connected) return;
+  if (!netUp()) { if (!view) { statusMsg = 'A ligar aos servidores (0/' + BROKERS.length + ')…'; render(); } return; }
   const now = Date.now();
   if (!view) {
     if (now - helloAt > 3500) {
@@ -383,12 +400,15 @@ function onClientMessage(topic, d){
   if (!d) return;
   lastHost = Date.now();
   if (statusMsg && d.t !== 'err') { statusMsg = ''; if (d.t === 'pong') render(); }
-  if (d.t === 'state') { view = d.v; render(); }
+  if (d.t === 'state') {
+    if (d.hs === lastHs && d.seq <= lastSeq) return;   // estado antigo (chegou por outro servidor)
+    lastHs = d.hs; lastSeq = d.seq; view = d.v; render();
+  }
   else if (d.t === 'err') { toast(d.m); if (d.fatal) leave(true); }
 }
 function send(a){
   if (role === 'host') return act(myPid, a);
-  if (mq && mq.connected) pub(T(code).host, { ...a, from: myPid }); else toast('Sem ligação…');
+  if (netUp()) pub(T(code).host, { ...a, from: myPid }); else toast('Sem ligação…');
 }
 function leave(silent){
   if (!silent && !confirm(role === 'host' ? 'Fechar a sala? O jogo termina para todos.' : 'Sair do jogo?')) return;
@@ -396,14 +416,14 @@ function leave(silent){
   else if (role === 'client') pub(T(code).host, { t: 'bye', from: myPid });
   const r = role; role = null; view = null; G = null; statusMsg = ''; conns.clear(); links.clear();
   clearInterval(pingTimer); clearInterval(hbTimer); clearTimeout(claimTimer);
-  const m = mq; mq = null; setTimeout(() => { try { m && m.end(); } catch {} }, 500);
+  netEnd();
   if (r) render();
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   keepAwake();
-  if (mq && !mq.connected) { try { mq.reconnect(); } catch {} }
-  else if (role === 'client') sayHello();
+  netReconnect();
+  if (role === 'client' && netUp()) sayHello();
 });
 
 /* ======================= UI ======================= */
@@ -433,7 +453,7 @@ function render(){
   });
 }
 function topBar(){
-  return `<div class="top"><div class="code">Sala <b>${esc(code || '')}</b>${role==='host' ? ' · anfitrião' : ''}</div>
+  return `<div class="top"><div class="code">Sala <b>${esc(code || '')}</b>${role==='host' ? ' · anfitrião' : ''}<br><span style="font-size:12px">servidores ligados: ${netUp()}/${BROKERS.length} · ${VERSION}</span></div>
     <button class="small danger" id="leave">${role === 'host' ? 'Fechar sala' : 'Sair'}</button></div>`;
 }
 function bindTop(){ const b = document.getElementById('leave'); if (b) b.onclick = () => leave(false); }
@@ -453,7 +473,8 @@ function renderHome(){
       <li>Cada jogador leva em segredo 0 a 3 moedas (na 1.ª ronda, pelo menos 1).</li>
       <li>À vez, cada um diz quantas moedas acha que há no total. Não se pode repetir um número já dito.</li>
       <li>Quem acertar fica safo e sai. Se ninguém acertar, ninguém sai.</li>
-      <li>Em cada ronda começa o jogador seguinte. O último que sobrar paga!</li></ol></details></div>`;
+      <li>Em cada ronda começa o jogador seguinte. O último que sobrar paga!</li></ol></details></div>
+    <p class="muted center" style="font-size:12px">${VERSION}</p>`;
   const nm = document.getElementById('nm'), cd = document.getElementById('cd');
   nm.oninput = () => { myName = nm.value; LS.set('name', myName.trim()); };
   cd.oninput = () => { joinCode = cd.value = cd.value.toUpperCase().replace(/[^A-Z]/g, ''); };
