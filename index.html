@@ -115,7 +115,7 @@ const qs = new URLSearchParams(location.search);
 // Ligamo-nos a vários servidores ao mesmo tempo: basta um funcionar em todos os telemóveis.
 const BROKERS = qs.get('broker') ? qs.get('broker').split(',') : [
   'wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt' ];
-const VERSION = 'v3 · 2026-11-09';
+const VERSION = 'v4 · 2026-11-10';
 const TOPIC = 'jogo-moeda-v1';
 const T = c => ({ host: `${TOPIC}/${c}/h`, info: `${TOPIC}/${c}/info`, client: pid => `${TOPIC}/${c}/c/${pid}` });
 const log = (...a) => console.log('[moeda]', ...a);
@@ -190,7 +190,7 @@ function startHost(resume){
   if (resume) { G = resume; G.players.forEach(p => p.connected = p.pid === myPid); }
   else {
     G = { code: newCode(), phase: 'lobby', round: 0, starter: 0, coins: {}, guesses: [], order: [],
-          result: null, loser: null, firstStarter: myPid, players: [{ pid: myPid, name: myName, connected: true, out: false, place: null }] };
+          result: null, loser: null, firstStarter: myPid, players: [{ pid: myPid, uid: fbUid(), name: myName, connected: true, out: false, place: null }] };
   }
   code = G.code; conns.clear(); links.clear(); keepAwake(); openHostNet(); changed();
 }
@@ -209,7 +209,7 @@ function openHostNet(){
         if (role !== 'host') return;
         claimed = true; statusMsg = '';
         pub(t.info, { host: myPid, ts: Date.now() }, true);
-        changed();
+        changed(); ensureTable();
       }, 1500);
     });
   }, onHostMessage);
@@ -254,10 +254,12 @@ function onClientMsg(from, d){
     }
     const old = conns.get(p.pid); if (old && old.topic !== from) links.delete(old.topic);
     conns.set(p.pid, { topic: from, seen: Date.now() }); links.set(from, p.pid); p.connected = true;
+    if (d.uid) p.uid = String(d.uid).slice(0, 128);
     log('join', p.name); changed(); return;
   }
   const pid = links.get(from); if (!pid || !pl(pid)) return;
   touch(pid);
+  if (d.uid && pl(pid).uid !== d.uid) { pl(pid).uid = String(d.uid).slice(0, 128); changed(); }
   if (d.t === 'ping') return sendTo(from, { t: 'pong' });
   if (d.t === 'bye') { const p = pl(pid); p.connected = false; conns.delete(pid); links.delete(from); changed(); return; }
   act(pid, d);
@@ -265,7 +267,7 @@ function onClientMsg(from, d){
 
 function act(pid, d){
   const p = pl(pid); if (!p) return;
-  const err = m => pid === myPid ? toast(m) : sendTo(conns.get(pid), { t: 'err', m });
+  const err = m => pid === myPid ? toast(m) : sendTo(conns.get(pid)?.topic, { t: 'err', m });
   const isHost = pid === myPid;
   switch (d.t) {
     case 'coins': {
@@ -284,7 +286,7 @@ function act(pid, d){
     }
     case 'start':
       if (!isHost || G.phase !== 'lobby' || G.players.length < 2) return;
-      G.round = 1; G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); newRound(); break;
+      G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); beginGame(); break;
     case 'first':
       if (!isHost || G.phase !== 'lobby' || !pl(d.pid)) return;
       G.firstStarter = d.pid; break;
@@ -297,7 +299,7 @@ function act(pid, d){
       Object.assign(G, { phase: 'lobby', round: 0, coins: {}, guesses: [], order: [], result: null, loser: null });
       if (d.pid && pl(d.pid)) G.firstStarter = d.pid;
       if (!d.lobby && G.players.length >= 2) { // recomeça já, mesma ordem da mesa
-        G.round = 1; G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); newRound();
+        G.starter = Math.max(0, G.players.findIndex(x => x.pid === G.firstStarter)); beginGame();
       }
       break;
     case 'move': {
@@ -329,8 +331,9 @@ function maybeReveal(){
   const w = G.guesses.find(g => g.n === total);
   if (w) { const wp = pl(w.pid); wp.out = true; wp.place = G.players.filter(x => x.out).length; }
   G.result = { total, winner: w ? w.pid : null, coins: { ...G.coins }, guesses: [...G.guesses], round: G.round };
+  recordRound(act, total, w);
   const left = active();
-  if (left.length <= 1) { G.loser = left[0]?.pid || null; G.phase = 'over'; }
+  if (left.length <= 1) endGame(left[0]?.pid);
   else G.phase = 'reveal';
 }
 function kick(pid){
@@ -344,7 +347,7 @@ function kick(pid){
   G.guesses = G.guesses.filter(g => g.pid !== pid);
   const c = conns.get(pid); if (c) { sendTo(c.topic, { t: 'err', fatal: true, m: 'Foste removido do jogo.' }); links.delete(c.topic); conns.delete(pid); }
   if (G.phase !== 'lobby' && G.phase !== 'over') {
-    if (active().length <= 1) { G.loser = active()[0]?.pid || null; G.phase = 'over'; return; }
+    if (active().length <= 1) { endGame(active()[0]?.pid); return; }
     if (G.phase === 'coins') maybeStartGuess();
     else if (G.phase === 'guess') maybeReveal();
   }
@@ -354,14 +357,121 @@ function viewFor(pid){
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, round: G.round,
     players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place, ready: G.coins[p.pid] !== undefined })),
     myCoins: G.coins[pid] ?? null, order: G.order, guesses: G.guesses, range: range(),
-    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid,
+    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid, tableId: G.tableId || null,
     starter: G.phase === 'lobby' ? (pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid) : G.players[G.starter]?.pid, result: G.result, loser: G.loser
   };
 }
 function changed(){
   if (role !== 'host') return;
   if (claimed) for (const [pid, c] of conns) sendTo(c.topic, { t: 'state', seq: ++stateSeq, hs: hostSession, v: viewFor(pid) });
-  view = viewFor(myPid); LS.set('host', G); render();
+  view = viewFor(myPid); LS.set('host', G); syncTablePlayers(); render();
+}
+
+/* ======================= Persistência (Firebase) ======================= */
+// Tudo aqui é opcional: se o Firebase não carregar, o jogo funciona na mesma (só não grava).
+const fb = () => (window.FB && window.FB.ok ? window.FB : null);
+const fbUid = () => fb()?.uid || null;
+const uidOf = pid => pl(pid)?.uid || ('anon-' + String(pid).slice(0, 8));
+function onFbReady(){                       // chamado pelo módulo Firebase após o login anónimo
+  log('firebase pronto', fbUid());
+  if (myName) fb().saveDevice(myName).catch(e => log('device', e));
+  if (role === 'host' && G) { const me = pl(myPid); if (me) me.uid = fbUid(); ensureTable(); changed(); }
+  if (role === 'client') sayHello();
+  if (!role) render();
+}
+let tablePromise = null;
+function ensureTable(){
+  if (role !== 'host' || !G || !claimed || !fb()) return;
+  if (G.tableId) { syncTablePlayers(); flushGames(); return; }
+  if (tablePromise) return;
+  tablePromise = fb().createTable(G.code)
+    .then(id => { G.tableId = id; log('mesa criada', id); changed(); flushGames(); })
+    .catch(e => log('createTable falhou', e))
+    .finally(() => { tablePromise = null; });
+}
+function syncTablePlayers(){                // regista na mesa quem entrou (uid, nome, lugar)
+  if (!G.tableId || !fb()) return;
+  const list = G.players.filter(p => p.uid).map(p => ({ uid: p.uid, name: p.name, seat: G.players.indexOf(p) + 1 }));
+  if (!list.length) return;
+  const key = JSON.stringify(list); if (key === G.syncedKey) return;
+  G.syncedKey = key;
+  fb().syncPlayers(G.tableId, list).catch(e => { G.syncedKey = null; log('syncPlayers', e); });
+}
+function beginGame(){
+  G.rounds = []; G.gameStartedAt = Date.now(); G.gameStarter = uidOf(G.players[G.starter]?.pid);
+  G.round = 1; newRound();
+}
+function recordRound(act, total, w){
+  (G.rounds = G.rounds || []).push({
+    n: G.round, starter: uidOf(G.order[0]), total, winner: w ? uidOf(w.pid) : null,
+    coins: Object.fromEntries(act.map(p => [uidOf(p.pid), G.coins[p.pid] || 0])),
+    guesses: G.guesses.map(g => ({ p: uidOf(g.pid), n: g.n }))
+  });
+}
+function endGame(loserPid){
+  G.loser = loserPid || null; G.phase = 'over';
+  const n = G.players.length;
+  const results = G.players.map((p, i) => ({ uid: uidOf(p.pid), name: p.name, seat: i + 1, place: p.out ? p.place : n }));
+  const game = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    startedAt: G.gameStartedAt || Date.now(), endedAt: Date.now(),
+    starter: G.gameStarter || null, loser: loserPid ? uidOf(loserPid) : null,
+    playerUids: results.map(r => r.uid).filter(u => !u.startsWith('anon-')),
+    results, rounds: G.rounds || []
+  };
+  (G.pendingGames = G.pendingGames || []).push(game);
+  flushGames();
+}
+let flushing = false;
+function flushGames(){                      // grava jogos pendentes (sobrevive a falhas de rede / recarregar)
+  if (flushing || role !== 'host' || !G || !fb() || !(G.pendingGames || []).length) return;
+  if (!G.tableId) return ensureTable();
+  flushing = true;
+  const game = G.pendingGames[0];
+  fb().saveGame(G.tableId, game)
+    .then(() => { G.pendingGames = G.pendingGames.filter(g => g.id !== game.id); log('jogo gravado', game.id); })
+    .catch(e => {
+      log('saveGame falhou', e);
+      if (e && e.code === 'permission-denied') G.pendingGames = G.pendingGames.filter(g => g.id !== game.id); // já gravado / inválido
+    })
+    .finally(() => { flushing = false; LS.set('host', G); if ((G.pendingGames || []).length) setTimeout(flushGames, 5000); });
+}
+
+/* ---- Placard da mesa ---- */
+let board = { open: false, data: null, unsub: null };
+function openBoard(){
+  if (!fb() || !view?.tableId) return toast('Placard ainda não disponível.');
+  board.open = true; board.data = null; render();
+  board.unsub = fb().watchTable(view.tableId, d => { board.data = d || {}; if (board.open) render(); });
+}
+function closeBoard(){ board.open = false; try { board.unsub && board.unsub(); } catch {} board.unsub = null; render(); }
+function boardRows(d){
+  return Object.entries(d.stats || {}).map(([uid, s]) => ({
+    uid, name: d.players?.[uid]?.name || s.name || '?', games: s.games || 0, paid: s.paid || 0,
+    first: s.first || 0, avg: s.games ? (s.placeSum || 0) / s.games : 0
+  })).sort((a, b) => b.paid - a.paid || (b.paid / (b.games || 1)) - (a.paid / (a.games || 1)) || a.avg - b.avg);
+}
+function boardScreen(){
+  const d = board.data;
+  let body = '<p class="center muted">A carregar…</p>';
+  if (d) {
+    const rows = boardRows(d), me = fbUid();
+    body = rows.length ? `<table><tr><th>Jogador</th><th class="n">Jogos</th><th class="n">Pagou</th><th class="n">1.º</th><th class="n">Pos.</th></tr>
+      ${rows.map((r, i) => `<tr class="${r.uid === me ? 'turn' : ''}"><td>${i === 0 && r.paid ? '💸 ' : ''}${esc(r.name)}</td><td class="n">${r.games}</td>
+        <td class="n">${r.paid}</td><td class="n">${r.first}</td><td class="n">${r.avg ? r.avg.toFixed(1) : '–'}</td></tr>`).join('')}</table>
+      <p class="muted" style="font-size:13px;margin:10px 0 0">Pos. = posição média de saída (1 = sai primeiro).</p>`
+      : '<p class="center muted">Ainda não há jogos terminados nesta mesa.</p>';
+  }
+  return `<div class="card"><h2>Placard da mesa ${esc(view?.code || '')}${d ? ` · ${d.gamesCount || 0} jogo${d.gamesCount === 1 ? '' : 's'}` : ''}</h2>${body}</div>
+    <button class="sec" id="closeBoard">Voltar ao jogo</button>`;
+}
+
+/* ---- Histórico do telemóvel (ecrã inicial) ---- */
+let profile = null, profileLoading = false;
+function loadProfile(){
+  if (!fb() || profile || profileLoading) return;
+  profileLoading = true;
+  fb().myProfile().then(p => { profile = p; if (!role) render(); }).catch(e => log('profile', e)).finally(() => { profileLoading = false; });
 }
 
 /* ======================= Cliente ======================= */
@@ -377,7 +487,7 @@ function joinGame(c){
   clearInterval(pingTimer);
   pingTimer = setInterval(clientTick, 4000);
 }
-function sayHello(){ helloAt = Date.now(); pub(T(code).host, { t: 'hello', from: myPid, name: myName }); }
+function sayHello(){ helloAt = Date.now(); pub(T(code).host, { t: 'hello', from: myPid, name: myName, uid: fbUid() }); }
 function clientTick(){
   if (role !== 'client') return clearInterval(pingTimer);
   if (!netUp()) { if (!view) { statusMsg = 'A ligar aos servidores (0/' + BROKERS.length + ')…'; render(); } return; }
@@ -389,7 +499,7 @@ function clientTick(){
     }
     return;
   }
-  pub(T(code).host, { t: 'ping', from: myPid });
+  pub(T(code).host, { t: 'ping', from: myPid, uid: fbUid() });
   if (now - lastHost > 15000) {
     statusMsg = 'Sem resposta do anfitrião… (o ecrã dele pode estar bloqueado)'; render(); sayHello();
   }
@@ -414,6 +524,8 @@ function leave(silent){
   if (!silent && !confirm(role === 'host' ? 'Fechar a sala? O jogo termina para todos.' : 'Sair do jogo?')) return;
   if (role === 'host') { LS.del('host'); pub(T(code).info, null, true); }
   else if (role === 'client') pub(T(code).host, { t: 'bye', from: myPid });
+  if (board.open) { try { board.unsub && board.unsub(); } catch {} board = { open: false, data: null, unsub: null }; }
+  profile = null;
   const r = role; role = null; view = null; G = null; statusMsg = ''; conns.clear(); links.clear();
   clearInterval(pingTimer); clearInterval(hbTimer); clearTimeout(claimTimer);
   netEnd();
@@ -433,6 +545,7 @@ const nameOf = pid => esc(view.players.find(p => p.pid === pid)?.name ?? '?');
 function render(){
   if (!role) return renderHome();
   if (!view) { app.innerHTML = topBar() + `<div class="card center">${esc(statusMsg || 'A ligar…')}</div>`; bindTop(); return; }
+  if (board.open) { app.innerHTML = topBar() + boardScreen(); bindTop(); document.getElementById('closeBoard').onclick = closeBoard; return; }
   const v = view, me = v.players.find(p => p.pid === v.me), isHost = v.me === v.hostPid;
   let main = '';
   if (v.phase === 'lobby') main = lobby(v, isHost);
@@ -454,16 +567,20 @@ function render(){
 }
 function topBar(){
   return `<div class="top"><div class="code">Sala <b>${esc(code || '')}</b>${role==='host' ? ' · anfitrião' : ''}<br><span style="font-size:12px">servidores ligados: ${netUp()}/${BROKERS.length} · ${VERSION}</span></div>
-    <button class="small danger" id="leave">${role === 'host' ? 'Fechar sala' : 'Sair'}</button></div>`;
+    <div class="row" style="flex:0 0 auto;gap:6px">${view?.tableId && fb() && !board.open ? '<button class="small sec" id="board">🏆 Placard</button>' : ''}<button class="small danger" id="leave">${role === 'host' ? 'Fechar sala' : 'Sair'}</button></div></div>`;
 }
-function bindTop(){ const b = document.getElementById('leave'); if (b) b.onclick = () => leave(false); }
+function bindTop(){
+  const b = document.getElementById('leave'); if (b) b.onclick = () => leave(false);
+  const p = document.getElementById('board'); if (p) p.onclick = openBoard;
+}
 
 function renderHome(){
   const saved = LS.get('host');
   app.innerHTML = `
     <h1>🪙 Jogo da Moeda</h1><p class="sub">Adivinha quantas moedas há em jogo</p>
     <div class="card"><label for="nm">O teu nickname</label>
-      <input id="nm" maxlength="16" autocomplete="off" placeholder="ex.: Zé" value="${esc(myName)}"></div>
+      <input id="nm" maxlength="16" autocomplete="off" placeholder="ex.: Zé" value="${esc(myName)}">
+      ${profile ? `<p class="muted" style="margin:10px 0 0;font-size:14px">O teu histórico: <b>${profile.tables}</b> mesa${profile.tables === 1 ? '' : 's'} · <b>${profile.games}</b> jogo${profile.games === 1 ? '' : 's'} · pagaste <b>${profile.paid}</b> · 1.º <b>${profile.first}</b></p>` : ''}</div>
     <div class="card"><h2>Criar jogo</h2><button id="host">Criar sala</button>
       ${saved && saved.phase ? `<div class="gap"></div><button class="sec" id="resume">Retomar sala ${esc(saved.code)}</button>` : ''}</div>
     <div class="card"><h2>Entrar num jogo</h2><label for="cd">Código da sala</label>
@@ -474,15 +591,17 @@ function renderHome(){
       <li>À vez, cada um diz quantas moedas acha que há no total. Não se pode repetir um número já dito.</li>
       <li>Quem acertar fica safo e sai. Se ninguém acertar, ninguém sai.</li>
       <li>Em cada ronda começa o jogador seguinte. O último que sobrar paga!</li></ol></details></div>
-    <p class="muted center" style="font-size:12px">${VERSION}</p>`;
+    <p class="muted center" style="font-size:12px">Guardamos o nickname, o tipo de telemóvel e as estatísticas de jogo, sem login.<br>${VERSION}</p>`;
+  loadProfile();
   const nm = document.getElementById('nm'), cd = document.getElementById('cd');
   nm.oninput = () => { myName = nm.value; LS.set('name', myName.trim()); };
   cd.oninput = () => { joinCode = cd.value = cd.value.toUpperCase().replace(/[^A-Z]/g, ''); };
   const needName = () => { myName = nm.value.trim(); if (!myName) { toast('Escreve um nickname primeiro.'); nm.focus(); return false; } LS.set('name', myName); return true; };
-  document.getElementById('host').onclick = () => { if (needName()) { LS.del('host'); startHost(null); } };
-  const r = document.getElementById('resume'); if (r) r.onclick = () => { if (needName()) startHost(saved); };
+  const needName0 = needName; const needNameFb = () => { const ok = needName0(); if (ok && fb()) fb().saveDevice(myName).catch(e => log('device', e)); return ok; };
+  document.getElementById('host').onclick = () => { if (needNameFb()) { LS.del('host'); startHost(null); } };
+  const r = document.getElementById('resume'); if (r) r.onclick = () => { if (needNameFb()) startHost(saved); };
   document.getElementById('join').onclick = () => {
-    if (!needName()) return; if (joinCode.length !== 4) return toast('O código tem 4 letras.'); joinGame(joinCode); };
+    if (!needNameFb()) return; if (joinCode.length !== 4) return toast('O código tem 4 letras.'); joinGame(joinCode); };
 }
 
 function lobby(v, isHost){
@@ -572,6 +691,95 @@ function playersCard(v, isHost){
 }
 
 render();
+</script>
+<script type="module">
+/* ======================= Firebase (Auth anónima + Firestore) ======================= */
+// Os valores abaixo identificam o projeto e são públicos por natureza; a proteção está nas regras do Firestore.
+const firebaseConfig = {
+  apiKey: "AIzaSyC-c5j6k8f-gJnblpVXaVO4pJVld0AunW8",
+  authDomain: "jogo-moeda.firebaseapp.com",
+  projectId: "jogo-moeda",
+  storageBucket: "jogo-moeda.firebasestorage.app",
+  messagingSenderId: "953412569664",
+  appId: "1:953412569664:web:0da53cf40927839ca5eda5"
+};
+const FB_SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const params = new URLSearchParams(location.search);
+
+function deviceInfo(){
+  const ua = navigator.userAgent || '';
+  const platform = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iOS'
+    : /Android/.test(ua) ? 'Android' : 'Desktop';
+  const browser = /SamsungBrowser/.test(ua) ? 'Samsung' : /EdgA?\//.test(ua) ? 'Edge' : /FxiOS|Firefox/.test(ua) ? 'Firefox'
+    : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : 'Outro';
+  return { platform, browser, lang: (navigator.language || '').slice(0, 10) };
+}
+
+if (params.get('nofb') !== '1') {
+  try {
+    const [{ initializeApp }, A, F] = await Promise.all([
+      import(FB_SDK + 'firebase-app.js'), import(FB_SDK + 'firebase-auth.js'), import(FB_SDK + 'firebase-firestore.js')]);
+    const app = initializeApp(firebaseConfig);
+    const auth = A.getAuth(app), db = F.getFirestore(app);
+    const emu = params.get('fbemu');                       // testes locais com o emulador
+    if (emu) { A.connectAuthEmulator(auth, `http://${emu}:9099`, { disableWarnings: true }); F.connectFirestoreEmulator(db, emu, 8085); }
+    const { doc, getDoc, setDoc, updateDoc, collection, addDoc, writeBatch, onSnapshot, query, where, getDocs, limit,
+            serverTimestamp, arrayUnion, increment } = F;
+
+    const FB = window.FB = {
+      ok: false, uid: null,
+      async saveDevice(name){
+        const ref = doc(db, 'devices', FB.uid);
+        const snap = await getDoc(ref);
+        const data = { name: String(name).slice(0, 16), names: arrayUnion(String(name).slice(0, 16)), ...deviceInfo(), lastSeen: serverTimestamp() };
+        if (!snap.exists()) data.firstSeen = serverTimestamp();
+        await setDoc(ref, data, { merge: true });
+      },
+      async createTable(code){
+        const ref = await addDoc(collection(db, 'tables'), {
+          code, hostUid: FB.uid, createdAt: serverTimestamp(), lastActivityAt: serverTimestamp(),
+          gamesCount: 0, playerUids: [], players: {}, stats: {} });
+        return ref.id;
+      },
+      async syncPlayers(tableId, list){
+        const upd = { playerUids: arrayUnion(...list.map(x => x.uid)), lastActivityAt: serverTimestamp() };
+        list.forEach(x => { upd['players.' + x.uid] = { name: x.name, seat: x.seat }; });
+        await updateDoc(doc(db, 'tables', tableId), upd);
+      },
+      async saveGame(tableId, g){
+        const b = writeBatch(db);
+        const { id, ...data } = g;
+        b.set(doc(db, 'tables', tableId, 'games', id), { ...data, createdAt: serverTimestamp() });
+        const upd = { gamesCount: increment(1), lastActivityAt: serverTimestamp() };
+        g.results.filter(r => !r.uid.startsWith('anon-')).forEach(r => {
+          const k = 'stats.' + r.uid + '.';
+          upd[k + 'name'] = r.name;
+          upd[k + 'games'] = increment(1);
+          upd[k + 'paid'] = increment(r.uid === g.loser ? 1 : 0);
+          upd[k + 'first'] = increment(r.place === 1 ? 1 : 0);
+          upd[k + 'placeSum'] = increment(r.place);
+        });
+        b.update(doc(db, 'tables', tableId), upd);
+        await b.commit();
+      },
+      watchTable(tableId, cb){
+        return onSnapshot(doc(db, 'tables', tableId), s => cb(s.data()), e => console.warn('[moeda] placard', e));
+      },
+      async myProfile(){
+        const qs = await getDocs(query(collection(db, 'tables'), where('playerUids', 'array-contains', FB.uid), limit(500)));
+        const p = { tables: qs.size, games: 0, paid: 0, first: 0 };
+        qs.forEach(d => { const s = d.data().stats?.[FB.uid]; if (s) { p.games += s.games || 0; p.paid += s.paid || 0; p.first += s.first || 0; } });
+        return p;
+      }
+    };
+    A.onAuthStateChanged(auth, u => {
+      if (u && !FB.ok) { FB.uid = u.uid; FB.ok = true; try { window.onFbReady && window.onFbReady(); } catch (e) { console.error(e); } }
+    });
+    await A.signInAnonymously(auth);
+  } catch (e) {
+    console.warn('[moeda] Firebase indisponível — o jogo continua sem gravar.', e);
+  }
+}
 </script>
 </body>
 </html>

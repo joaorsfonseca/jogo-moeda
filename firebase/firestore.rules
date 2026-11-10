@@ -1,45 +1,48 @@
 rules_version = '2';
-// Jogo da Moeda — regras Firestore (RASCUNHO, a fechar depois de acordado o modelo de dados)
-// Identidade: Firebase Anonymous Auth (invisível para o jogador) → request.auth.uid = id do dispositivo/browser.
+// Jogo da Moeda — regras Firestore
+// Identidade: Firebase Anonymous Auth (invisível para o jogador) → request.auth.uid = id do telemóvel.
+//
+// devices/{uid}                    perfil do telemóvel (só o próprio escreve)
+// tables/{tableId}                 mesa (jantar, café…) — só o anfitrião escreve; inclui placard (stats)
+// tables/{tableId}/games/{gameId}  jogo terminado, com rondas — só o anfitrião cria; imutável
 service cloud.firestore {
   match /databases/{db}/documents {
 
     function signedIn() { return request.auth != null; }
-    function isStr(v, max) { return v is string && v.size() > 0 && v.size() <= max; }
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
 
-    // Perfil do dispositivo: cada dispositivo só escreve o seu próprio documento.
     match /devices/{uid} {
       allow read: if signedIn();
       allow create, update: if signedIn() && request.auth.uid == uid
-        && isStr(request.resource.data.name, 16)
-        && request.resource.data.keys().hasOnly(['name', 'names', 'platform', 'browser', 'lang', 'firstSeen', 'lastSeen']);
+        && request.resource.data.keys().hasOnly(['name', 'names', 'platform', 'browser', 'lang', 'firstSeen', 'lastSeen'])
+        && isStr(request.resource.data.name, 0, 16)
+        && request.resource.data.names is list && request.resource.data.names.size() <= 50;
       allow delete: if false;
     }
 
-    // Mesa (sala criada por um anfitrião). Só o anfitrião cria/atualiza.
     match /tables/{tableId} {
+      function isHost() { return signedIn() && resource.data.hostUid == request.auth.uid; }
+
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid
-        && isStr(request.resource.data.code, 4);
-      allow update: if signedIn() && resource.data.hostUid == request.auth.uid
-        && request.resource.data.hostUid == resource.data.hostUid;
+      allow create: if signedIn()
+        && request.resource.data.hostUid == request.auth.uid
+        && isStr(request.resource.data.code, 4, 4)
+        && request.resource.data.gamesCount == 0;
+      allow update: if isHost()
+        && request.resource.data.hostUid == resource.data.hostUid
+        && request.resource.data.code == resource.data.code
+        && request.resource.data.playerUids.size() <= 60;
       allow delete: if false;
 
-      // Jogo terminado (imutável). Só o anfitrião da mesa grava.
       match /games/{gameId} {
         allow read: if signedIn();
         allow create: if signedIn()
           && get(/databases/$(db)/documents/tables/$(tableId)).data.hostUid == request.auth.uid
-          && request.resource.data.playerUids is list
-          && request.resource.data.playerUids.size() >= 2
-          && request.resource.data.playerUids.size() <= 40;
+          && request.resource.data.results is list
+          && request.resource.data.results.size() >= 2 && request.resource.data.results.size() <= 40
+          && request.resource.data.rounds is list && request.resource.data.rounds.size() <= 500;
         allow update, delete: if false;
       }
-    }
-
-    // Consultas collection group (estatísticas por jogador em todas as mesas).
-    match /{path=**}/games/{gameId} {
-      allow read: if signedIn();
     }
   }
 }
