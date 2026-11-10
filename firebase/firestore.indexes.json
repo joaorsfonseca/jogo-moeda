@@ -1,0 +1,21 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "games",
+      "fieldPath": "playerUids",
+      "indexes": [
+        { "queryScope": "COLLECTION", "arrayConfig": "CONTAINS" },
+        { "queryScope": "COLLECTION_GROUP", "arrayConfig": "CONTAINS" }
+      ]
+    },
+    {
+      "collectionGroup": "games",
+      "fieldPath": "loserUid",
+      "indexes": [
+        { "queryScope": "COLLECTION", "order": "ASCENDING" },
+        { "queryScope": "COLLECTION_GROUP", "order": "ASCENDING" }
+      ]
+    }
+  ]
+}

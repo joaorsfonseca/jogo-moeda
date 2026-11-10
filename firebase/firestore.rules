@@ -1,0 +1,45 @@
+rules_version = '2';
+// Jogo da Moeda — regras Firestore (RASCUNHO, a fechar depois de acordado o modelo de dados)
+// Identidade: Firebase Anonymous Auth (invisível para o jogador) → request.auth.uid = id do dispositivo/browser.
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isStr(v, max) { return v is string && v.size() > 0 && v.size() <= max; }
+
+    // Perfil do dispositivo: cada dispositivo só escreve o seu próprio documento.
+    match /devices/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && isStr(request.resource.data.name, 16)
+        && request.resource.data.keys().hasOnly(['name', 'names', 'platform', 'browser', 'lang', 'firstSeen', 'lastSeen']);
+      allow delete: if false;
+    }
+
+    // Mesa (sala criada por um anfitrião). Só o anfitrião cria/atualiza.
+    match /tables/{tableId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid
+        && isStr(request.resource.data.code, 4);
+      allow update: if signedIn() && resource.data.hostUid == request.auth.uid
+        && request.resource.data.hostUid == resource.data.hostUid;
+      allow delete: if false;
+
+      // Jogo terminado (imutável). Só o anfitrião da mesa grava.
+      match /games/{gameId} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && get(/databases/$(db)/documents/tables/$(tableId)).data.hostUid == request.auth.uid
+          && request.resource.data.playerUids is list
+          && request.resource.data.playerUids.size() >= 2
+          && request.resource.data.playerUids.size() <= 40;
+        allow update, delete: if false;
+      }
+    }
+
+    // Consultas collection group (estatísticas por jogador em todas as mesas).
+    match /{path=**}/games/{gameId} {
+      allow read: if signedIn();
+    }
+  }
+}
