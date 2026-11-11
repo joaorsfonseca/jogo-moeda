@@ -118,7 +118,7 @@ const qs = new URLSearchParams(location.search);
 // Ligamo-nos a vários servidores ao mesmo tempo: basta um funcionar em todos os telemóveis.
 const BROKERS = qs.get('broker') ? qs.get('broker').split(',') : [
   'wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt' ];
-const VERSION = 'v5 · 2026-11-10';
+const VERSION = 'v6 · 2026-11-11';
 const TOPIC = 'jogo-moeda-v1';
 const T = c => ({ host: `${TOPIC}/${c}/h`, info: `${TOPIC}/${c}/info`, client: pid => `${TOPIC}/${c}/c/${pid}` });
 const log = (...a) => console.log('[moeda]', ...a);
@@ -179,7 +179,9 @@ function pub(topic, obj, retain){
 /* ======================= Anfitrião (motor do jogo) ======================= */
 const pl = pid => G.players.find(p => p.pid === pid);
 const active = () => G.players.filter(p => !p.out);
-function range(){ const n = active().length; return { min: G.round === 1 ? n : 0, max: 3*n }; }
+// Regra da 1.ª ronda (levar pelo menos 1 moeda): só se aplica se a jornada começou com mais de 2 jogadores.
+const firstRule = () => G.round === 1 && G.firstMin !== false;
+function range(){ const n = active().length; return { min: firstRule() ? n : 0, max: 3*n }; }
 function nextActiveIdx(from){
   const L = G.players.length;
   for (let k = 1; k <= L; k++) { const j = (from + k) % L; if (!G.players[j].out) return j; }
@@ -275,8 +277,8 @@ function act(pid, d){
   switch (d.t) {
     case 'coins': {
       if (G.phase !== 'coins' || p.out) return;
-      const n = Number(d.n), min = G.round === 1 ? 1 : 0;
-      if (!Number.isInteger(n) || n < min || n > 3) return err(G.round === 1 ? 'Na 1.ª ronda tens de levar 1 a 3 moedas.' : 'Escolhe 0 a 3 moedas.');
+      const n = Number(d.n), min = firstRule() ? 1 : 0;
+      if (!Number.isInteger(n) || n < min || n > 3) return err(min ? 'Na 1.ª ronda tens de levar 1 a 3 moedas.' : 'Escolhe 0 a 3 moedas.');
       G.coins[pid] = n; maybeStartGuess(); break;
     }
     case 'guess': {
@@ -369,7 +371,7 @@ function viewFor(pid){
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, round: G.round,
     players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place, ready: G.coins[p.pid] !== undefined })),
     myCoins: G.coins[pid] ?? null, order: G.order, guesses: G.guesses, range: range(),
-    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid, tableId: G.tableId || null, duel: G.duel ? { ...G.duel.wins } : null,
+    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid, tableId: G.tableId || null, firstMin: firstRule(), duel: G.duel ? { ...G.duel.wins } : null,
     starter: G.phase === 'lobby' ? (pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid) : G.players[G.starter]?.pid, result: G.result, loser: G.loser
   };
 }
@@ -415,6 +417,7 @@ function checkDuel(){
 }
 function beginGame(){
   G.rounds = []; G.gameStartedAt = Date.now(); G.gameStarter = uidOf(G.players[G.starter]?.pid);
+  G.firstMin = G.players.length > 2;
   G.duel = null; G.round = 1; newRound(); checkDuel();
 }
 function recordRound(act, total, w){
@@ -604,7 +607,7 @@ function renderHome(){
       <div class="row"><input id="cd" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD" value="${esc(joinCode)}"
         style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button id="join" style="flex:0 0 110px">Entrar</button></div></div>
     <div class="card"><details><summary>Regras</summary><ol class="rules">
-      <li>Cada jogador leva em segredo 0 a 3 moedas (na 1.ª ronda, pelo menos 1).</li>
+      <li>Cada jogador leva em segredo 0 a 3 moedas (na 1.ª ronda, pelo menos 1, exceto se a jornada começar só com 2 jogadores).</li>
       <li>À vez, cada um diz quantas moedas acha que há no total. Não se pode repetir um número já dito.</li>
       <li>Quem acertar fica safo e sai. Se ninguém acertar, ninguém sai.</li>
       <li>Quando restam 2, é à melhor de 5: quem acertar 3 rondas fica safo.</li>
@@ -641,10 +644,10 @@ function coinsPhase(v, me){
   let body;
   if (!me || me.out) body = `<p class="center">Estás safo 🎉 — a assistir.</p>`;
   else {
-    const min = v.round === 1 ? 1 : 0;
+    const min = v.firstMin ? 1 : 0;
     body = `<p class="center">${v.myCoins == null ? 'Selecciona a quantidade de moedas que levas.' : `Levas <b>${v.myCoins}</b> 🪙 — podes mudar até todos escolherem.`}</p>
       <div class="coins">${[0,1,2,3].map(n => `<button class="coin ${v.myCoins === n ? 'sel' : ''}" data-a="coins" data-n="${n}" ${n < min ? 'disabled' : ''}>${n}</button>`).join('')}</div>
-      ${v.round === 1 ? '<p class="muted center" style="font-size:13px">1.ª ronda: obrigatório levar pelo menos 1.</p>' : ''}`;
+      ${v.firstMin ? '<p class="muted center" style="font-size:13px">1.ª ronda: obrigatório levar pelo menos 1.</p>' : ''}`;
   }
   return `<div class="card"><h2>Ronda ${v.round} · Escolher moedas</h2>${duelBanner(v)}${body}
     <p class="muted center" style="margin-bottom:0">${ready}/${act.length} prontos · começa <b>${nameOf(v.starter)}</b></p></div>`;
