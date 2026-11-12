@@ -1,18 +1,30 @@
 rules_version = '2';
 // Jogo da Moeda — regras Firestore
-// Identidade: Firebase Anonymous Auth (invisível para o jogador) → request.auth.uid = id do telemóvel.
+// Jogadores: Firebase Anonymous Auth (invisível) → request.auth.uid = id do telemóvel.
+// Administração (/dashboard): login Google + documento admins/{uid} criado à mão na consola.
 //
-// devices/{uid}                    perfil do telemóvel (só o próprio escreve)
+// admins/{uid}                     quem pode usar o dashboard (só se cria na consola)
+// devices/{uid}                    perfil do telemóvel (só o próprio escreve; lista só para admins)
 // tables/{tableId}                 mesa (jantar, café…) — só o anfitrião escreve; inclui placard (stats)
 // tables/{tableId}/games/{gameId}  jogo terminado, com rondas — só o anfitrião cria; imutável
 service cloud.firestore {
   match /databases/{db}/documents {
 
     function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous'
+        && exists(/databases/$(db)/documents/admins/$(request.auth.uid));
+    }
     function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
 
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
     match /devices/{uid} {
-      allow read: if signedIn();
+      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
       allow create, update: if signedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasOnly(['name', 'names', 'platform', 'browser', 'lang', 'firstSeen', 'lastSeen'])
         && isStr(request.resource.data.name, 0, 16)
@@ -23,7 +35,10 @@ service cloud.firestore {
     match /tables/{tableId} {
       function isHost() { return signedIn() && resource.data.hostUid == request.auth.uid; }
 
-      allow read: if signedIn();
+      // get: quem está na sala recebe o id da mesa pelo anfitrião (placard)
+      // list: cada telemóvel só lista as mesas onde entrou (histórico); admins listam tudo
+      allow get: if signedIn();
+      allow list: if isAdmin() || (signedIn() && request.auth.uid in resource.data.playerUids);
       allow create: if signedIn()
         && request.resource.data.hostUid == request.auth.uid
         && isStr(request.resource.data.code, 4, 4)
@@ -35,7 +50,7 @@ service cloud.firestore {
       allow delete: if false;
 
       match /games/{gameId} {
-        allow read: if signedIn();
+        allow read: if isAdmin();
         allow create: if signedIn()
           && get(/databases/$(db)/documents/tables/$(tableId)).data.hostUid == request.auth.uid
           && request.resource.data.results is list

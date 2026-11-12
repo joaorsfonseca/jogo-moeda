@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#123524">
+<title>Moeda · Administração</title>
+<style>
+  :root{
+    --bg:#123524; --card:#1b4a33; --card2:#225c40; --line:#2f7352;
+    --text:#f2efe4; --muted:#b9c9bd; --gold:#f2c14e; --red:#e5675a; --ok:#7bd88f; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  #app{max-width:1100px;margin:0 auto;padding:12px 16px 32px}
+  h1{font-size:22px;margin:8px 0}
+  h2{font-size:17px;margin:0 0 10px}
+  .muted{color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin:12px 0}
+  button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:9px 14px;cursor:pointer;background:var(--gold);color:#2a1d00}
+  button.sec{background:var(--card2);color:var(--text);border:1px solid var(--line)}
+  button.link{background:none;color:var(--gold);padding:0;font-weight:600;text-align:left}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+  .tabs button{background:var(--card2);color:var(--text);border:1px solid var(--line)}
+  .tabs button.on{background:var(--gold);color:#2a1d00;border-color:var(--gold)}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .tile .v{font-size:30px;font-weight:800;line-height:1.1}
+  .tile .l{color:var(--muted);font-size:13px}
+  .tile .s{color:var(--muted);font-size:12px;margin-top:2px}
+  .scroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{color:var(--muted);font-weight:500;font-size:12px;cursor:pointer;user-select:none}
+  td.n,th.n{text-align:right}
+  tr.click{cursor:pointer} tr.click:hover td{background:#ffffff0d}
+  input[type=search]{width:100%;max-width:320px;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:#0e2a1d;color:var(--text)}
+  .tag{font-size:12px;padding:2px 8px;border-radius:99px;background:var(--card2);color:var(--muted)}
+  .tag.red{background:#5a1f1a;color:#ffb3aa} .tag.ok{background:#1f5e33;color:var(--ok)}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:140px;padding-top:8px;border-bottom:1px solid var(--line)}
+  .bars .b{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;position:relative}
+  .bars .b i{display:block;background:var(--gold);border-radius:4px 4px 0 0;min-height:0}
+  .bars .b:hover i{background:#ffd877}
+  .bars .b:hover::after{content:attr(data-tip);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:#000d;color:#fff;
+    font-size:12px;padding:4px 8px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:2}
+  .axis{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:4px}
+  details>summary{cursor:pointer;color:var(--gold)}
+  .center{text-align:center}
+  .err{background:#5a1f1a;color:#ffd0ca;border-radius:10px;padding:10px 12px}
+  code{background:#0e2a1d;padding:2px 6px;border-radius:6px;user-select:all;word-break:break-all}
+</style>
+</head>
+<body>
+<div id="app"><p class="muted">A carregar…</p></div>
+<script type="module">
+/* ======================= Configuração ======================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyC-c5j6k8f-gJnblpVXaVO4pJVld0AunW8",
+  authDomain: "jogo-moeda.firebaseapp.com",
+  projectId: "jogo-moeda",
+  storageBucket: "jogo-moeda.firebasestorage.app",
+  messagingSenderId: "953412569664",
+  appId: "1:953412569664:web:0da53cf40927839ca5eda5"
+};
+const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const params = new URLSearchParams(location.search);
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const toDate = t => t ? (t.toDate ? t.toDate() : new Date(t)) : null;
+const fmt = t => { const d = toDate(t); return d ? d.toLocaleString('pt-PT', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '–'; };
+const fmtDay = d => d.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit' });
+const dur = (a, b) => { if (!a || !b) return '–'; const m = Math.round((b - a) / 60000); return m < 60 ? m + ' min' : Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0'); };
+
+let A, F, auth, db;
+try {
+  const [{ initializeApp }, a, f] = await Promise.all([import(SDK + 'firebase-app.js'), import(SDK + 'firebase-auth.js'), import(SDK + 'firebase-firestore.js')]);
+  A = a; F = f;
+  const fbApp = initializeApp(firebaseConfig);
+  auth = A.getAuth(fbApp); db = F.getFirestore(fbApp);
+  const emu = params.get('fbemu');
+  if (emu) {
+    A.connectAuthEmulator(auth, `http://${emu}:9099`, { disableWarnings: true }); F.connectFirestoreEmulator(db, emu, 8085);
+    window.__testLogin = (sub, email) => A.signInWithCredential(auth, A.GoogleAuthProvider.credential(JSON.stringify({ sub, email, email_verified: true })));
+  }
+} catch (e) {
+  app.innerHTML = `<div class="err">Não foi possível carregar o Firebase: ${esc(e.message)}</div>`;
+  throw e;
+}
+
+/* ======================= Estado ======================= */
+const S = { user: null, tab: 'resumo', tables: [], devices: [], loadedAt: null, error: null, table: null, games: null, sort: {}, q: '' };
+const devName = uid => S.devices.find(d => d.id === uid)?.name;
+
+/* ======================= Autenticação ======================= */
+A.onAuthStateChanged(auth, async u => {
+  S.user = u; S.error = null;
+  if (!u || u.isAnonymous) return renderLogin();
+  app.innerHTML = '<p class="muted">A verificar acesso…</p>';
+  try {
+    const adm = await F.getDoc(F.doc(db, 'admins', u.uid));
+    if (!adm.exists()) return renderNoAccess();
+    await load();
+  } catch (e) { S.error = e; renderNoAccess(); }
+});
+function renderLogin(){
+  app.innerHTML = `<h1>🪙 Moeda · Administração</h1>
+    <div class="card"><p>Área reservada. Entra com a tua conta Google.</p><button id="login">Entrar com Google</button></div>`;
+  document.getElementById('login').onclick = async () => {
+    try { await A.signInWithPopup(auth, new A.GoogleAuthProvider()); }
+    catch (e) { if (e.code === 'auth/popup-blocked') return A.signInWithRedirect(auth, new A.GoogleAuthProvider()); alert('Erro no login: ' + e.message); }
+  };
+}
+function renderNoAccess(){
+  app.innerHTML = `<h1>🪙 Moeda · Administração</h1>
+    <div class="card"><h2>Sem acesso</h2>
+    <p>Esta conta (${esc(S.user.email)}) ainda não é administradora.</p>
+    <p>Para dar acesso, na consola Firebase → Firestore Database → Data, cria a coleção <code>admins</code> com um documento cujo ID é:</p>
+    <p><code>${esc(S.user.uid)}</code></p>
+    <p class="muted">(Os campos do documento podem ficar vazios ou ter, por exemplo, <code>nome</code>.) Depois recarrega esta página.</p>
+    ${S.error ? `<p class="err">${esc(S.error.code || S.error.message)}</p>` : ''}
+    <button class="sec" id="logout">Sair</button></div>`;
+  document.getElementById('logout').onclick = () => A.signOut(auth);
+}
+
+/* ======================= Dados ======================= */
+async function load(){
+  app.innerHTML = '<p class="muted">A carregar dados…</p>';
+  try {
+    const [t, d] = await Promise.all([
+      F.getDocs(F.query(F.collection(db, 'tables'), F.orderBy('createdAt', 'desc'), F.limit(1000))),
+      F.getDocs(F.query(F.collection(db, 'devices'), F.limit(5000)))
+    ]);
+    S.tables = t.docs.map(x => ({ id: x.id, ...x.data() }));
+    S.devices = d.docs.map(x => ({ id: x.id, ...x.data() }));
+    S.loadedAt = new Date(); S.error = null;
+  } catch (e) { S.error = e; }
+  render();
+}
+async function openTable(id){
+  S.table = S.tables.find(t => t.id === id); S.games = null; S.tab = 'mesa'; render();
+  try {
+    const g = await F.getDocs(F.query(F.collection(db, 'tables', id, 'games'), F.orderBy('endedAt', 'desc'), F.limit(500)));
+    S.games = g.docs.map(x => ({ id: x.id, ...x.data() }));
+  } catch (e) { S.games = []; S.error = e; }
+  render();
+}
+function playerRows(){
+  const rows = S.devices.map(d => ({ uid: d.id, name: d.name, names: d.names || [], platform: d.platform, browser: d.browser,
+    firstSeen: toDate(d.firstSeen), lastSeen: toDate(d.lastSeen), tables: 0, hosted: 0, games: 0, paid: 0, first: 0 }));
+  const by = Object.fromEntries(rows.map(r => [r.uid, r]));
+  for (const t of S.tables) {
+    if (by[t.hostUid]) by[t.hostUid].hosted++;
+    for (const uid of t.playerUids || []) {
+      const r = by[uid] || (by[uid] = (rows.push({ uid, name: t.players?.[uid]?.name || '?', names: [], tables: 0, hosted: 0, games: 0, paid: 0, first: 0 }), rows[rows.length - 1]));
+      r.tables++;
+      const s = t.stats?.[uid]; if (s) { r.games += s.games || 0; r.paid += s.paid || 0; r.first += s.first || 0; }
+    }
+  }
+  return rows;
+}
+
+/* ======================= UI ======================= */
+function render(){
+  const tabs = [['resumo', 'Resumo'], ['mesas', `Mesas (${S.tables.length})`], ['jogadores', `Jogadores (${S.devices.length})`]];
+  if (S.table) tabs.push(['mesa', 'Mesa ' + S.table.code]);
+  let body = '';
+  if (S.tab === 'resumo') body = resumo();
+  else if (S.tab === 'mesas') body = mesas();
+  else if (S.tab === 'jogadores') body = jogadores();
+  else if (S.tab === 'mesa') body = mesa();
+  app.innerHTML = `<div class="top"><h1>🪙 Moeda · Administração</h1>
+      <div class="muted" style="font-size:13px">${esc(S.user.email)} · dados de ${S.loadedAt ? S.loadedAt.toLocaleTimeString('pt-PT') : '–'}
+      <button class="sec" id="reload">Atualizar</button> <button class="sec" id="logout">Sair</button></div></div>
+    ${S.error ? `<div class="err">Erro: ${esc(S.error.code || S.error.message)}</div>` : ''}
+    <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>
+    ${body}`;
+  document.getElementById('reload').onclick = load;
+  document.getElementById('logout').onclick = () => A.signOut(auth);
+  app.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; render(); });
+  app.querySelectorAll('[data-table]').forEach(b => b.onclick = () => openTable(b.dataset.table));
+  app.querySelectorAll('[data-sort]').forEach(th => th.onclick = () => {
+    const [tbl, key] = th.dataset.sort.split(':'); const cur = S.sort[tbl];
+    S.sort[tbl] = { key, dir: cur && cur.key === key ? -cur.dir : -1 }; render();
+  });
+  const q = document.getElementById('q'); if (q) { q.oninput = () => { S.q = q.value; render(); const n = document.getElementById('q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }; }
+}
+function sorted(tbl, rows, defKey){
+  const s = S.sort[tbl] || { key: defKey, dir: -1 };
+  const v = x => { const y = x[s.key]; return y instanceof Date ? y.getTime() : y ?? ''; };
+  return [...rows].sort((a, b) => (v(a) > v(b) ? 1 : v(a) < v(b) ? -1 : 0) * s.dir);
+}
+const th = (tbl, key, label, n) => `<th class="${n ? 'n' : ''}" data-sort="${tbl}:${key}">${label}</th>`;
+const tile = (v, l, s) => `<div class="tile"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+
+function resumo(){
+  const now = Date.now(), d7 = now - 7 * 864e5, d30 = now - 30 * 864e5;
+  const t7 = S.tables.filter(t => toDate(t.createdAt)?.getTime() > d7).length;
+  const games = S.tables.reduce((s, t) => s + (t.gamesCount || 0), 0);
+  const withGames = S.tables.filter(t => t.gamesCount > 0).length;
+  const active30 = S.devices.filter(d => toDate(d.lastSeen)?.getTime() > d30).length;
+  const avgPlayers = S.tables.length ? (S.tables.reduce((s, t) => s + (t.playerUids || []).length, 0) / S.tables.length).toFixed(1) : '–';
+  const plat = {}; S.devices.forEach(d => { const k = (d.platform || '?') + ' · ' + (d.browser || '?'); plat[k] = (plat[k] || 0) + 1; });
+  // mesas por dia (últimos 14 dias)
+  const days = []; for (let i = 13; i >= 0; i--) { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i); days.push({ d, n: 0, g: 0 }); }
+  S.tables.forEach(t => { const c = toDate(t.createdAt); if (!c) return; const k = new Date(c); k.setHours(0, 0, 0, 0);
+    const day = days.find(x => x.d.getTime() === k.getTime()); if (day) { day.n++; day.g += t.gamesCount || 0; } });
+  const max = Math.max(1, ...days.map(x => x.n));
+  return `<div class="tiles">
+      ${tile(S.tables.length, 'Mesas abertas', `${t7} nos últimos 7 dias`)}
+      ${tile(withGames, 'Mesas com jogos', S.tables.length ? Math.round(withGames / S.tables.length * 100) + '% das mesas' : '')}
+      ${tile(games, 'Jogos terminados', withGames ? (games / withGames).toFixed(1) + ' por mesa com jogos' : '')}
+      ${tile(S.devices.length, 'Jogadores (telemóveis)', `${active30} ativos nos últimos 30 dias`)}
+      ${tile(avgPlayers, 'Jogadores por mesa', 'média')}
+    </div>
+    <div class="card"><h2>Mesas abertas por dia · últimos 14 dias</h2>
+      <div class="bars" role="img" aria-label="Mesas abertas por dia nos últimos 14 dias">
+        ${days.map(x => `<div class="b" data-tip="${fmtDay(x.d)}: ${x.n} mesa${x.n === 1 ? '' : 's'}, ${x.g} jogo${x.g === 1 ? '' : 's'}"><i style="height:${x.n / max * 100}%"></i></div>`).join('')}
+      </div>
+      <div class="axis"><span>${fmtDay(days[0].d)}</span><span>${fmtDay(days[13].d)}</span></div>
+      <details style="margin-top:8px"><summary>Ver como tabela</summary><div class="scroll"><table><tr><th>Dia</th><th class="n">Mesas</th><th class="n">Jogos</th></tr>
+        ${days.map(x => `<tr><td>${fmtDay(x.d)}</td><td class="n">${x.n}</td><td class="n">${x.g}</td></tr>`).join('')}</table></div></details>
+    </div>
+    <div class="card"><h2>Dispositivos</h2><div class="scroll"><table><tr><th>Plataforma · browser</th><th class="n">Jogadores</th></tr>
+      ${Object.entries(plat).sort((a, b) => b[1] - a[1]).map(([k, n]) => `<tr><td>${esc(k)}</td><td class="n">${n}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">Sem dados</td></tr>'}
+    </table></div></div>`;
+}
+function mesas(){
+  const rows = S.tables.map(t => ({ ...t, created: toDate(t.createdAt), last: toDate(t.lastActivityAt), nPlayers: (t.playerUids || []).length,
+    host: t.players?.[t.hostUid]?.name || devName(t.hostUid) || '?' }));
+  return `<div class="card"><div class="scroll"><table><tr>
+      ${th('mesas', 'created', 'Aberta em')}${th('mesas', 'code', 'Código')}${th('mesas', 'host', 'Anfitrião')}
+      ${th('mesas', 'nPlayers', 'Jogadores', 1)}${th('mesas', 'gamesCount', 'Jogos', 1)}${th('mesas', 'last', 'Última atividade')}</tr>
+    ${sorted('mesas', rows, 'created').map(t => `<tr class="click" data-table="${esc(t.id)}"><td>${fmt(t.created)}</td><td><b>${esc(t.code)}</b></td>
+      <td>${esc(t.host)}</td><td class="n">${t.nPlayers}</td><td class="n">${t.gamesCount || 0}</td><td>${fmt(t.last)}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="muted">Ainda não há mesas.</td></tr>'}
+  </table></div><p class="muted" style="font-size:13px;margin-bottom:0">Toca numa mesa para ver jogadores, jogos e rondas.</p></div>`;
+}
+function jogadores(){
+  const q = S.q.trim().toLowerCase();
+  const rows = playerRows().filter(r => !q || [r.name, ...r.names].some(n => (n || '').toLowerCase().includes(q)));
+  return `<div class="card"><input type="search" id="q" placeholder="Procurar nickname…" value="${esc(S.q)}">
+    <div class="scroll" style="margin-top:10px"><table><tr>
+      ${th('jog', 'name', 'Nickname')}${th('jog', 'platform', 'Dispositivo')}${th('jog', 'tables', 'Mesas', 1)}${th('jog', 'hosted', 'Anfitrião', 1)}
+      ${th('jog', 'games', 'Jogos', 1)}${th('jog', 'paid', 'Pagou', 1)}${th('jog', 'first', '1.º', 1)}${th('jog', 'firstSeen', '1.ª visita')}${th('jog', 'lastSeen', 'Última visita')}</tr>
+    ${sorted('jog', rows, 'lastSeen').map(r => `<tr><td><b>${esc(r.name || '?')}</b>${r.names.length > 1 ? `<div class="muted" style="font-size:12px">também: ${esc(r.names.filter(n => n !== r.name).join(', '))}</div>` : ''}</td>
+      <td>${esc((r.platform || '?') + ' · ' + (r.browser || '?'))}</td><td class="n">${r.tables}</td><td class="n">${r.hosted}</td><td class="n">${r.games}</td>
+      <td class="n">${r.paid}</td><td class="n">${r.first}</td><td>${fmt(r.firstSeen)}</td><td>${fmt(r.lastSeen)}</td></tr>`).join('')
+      || '<tr><td colspan="9" class="muted">Sem resultados.</td></tr>'}
+  </table></div></div>`;
+}
+function mesa(){
+  const t = S.table; if (!t) return '';
+  const name = uid => t.players?.[uid]?.name || devName(uid) || (String(uid).startsWith('anon-') ? '(sem registo)' : '?');
+  const pl = Object.entries(t.players || {}).map(([uid, p]) => ({ uid, ...p, ...(t.stats?.[uid] || {}) })).sort((a, b) => (a.seat || 99) - (b.seat || 99));
+  const games = S.games;
+  return `<div class="card"><h2>Mesa ${esc(t.code)} · ${fmt(t.createdAt)}</h2>
+      <p class="muted" style="margin-top:0">Anfitrião: <b>${esc(name(t.hostUid))}</b> · ${(t.playerUids || []).length} jogadores · ${t.gamesCount || 0} jogos · última atividade ${fmt(t.lastActivityAt)}</p>
+      <div class="scroll"><table><tr><th>Lugar</th><th>Jogador</th><th class="n">Jogos</th><th class="n">Pagou</th><th class="n">1.º</th><th class="n">Pos. média</th></tr>
+      ${pl.map(p => `<tr><td>${p.seat || '–'}</td><td>${esc(p.name)}</td><td class="n">${p.games || 0}</td><td class="n">${p.paid || 0}</td><td class="n">${p.first || 0}</td>
+        <td class="n">${p.games ? (p.placeSum / p.games).toFixed(1) : '–'}</td></tr>`).join('')}</table></div></div>
+    <div class="card"><h2>Jogos</h2>
+      ${games === null ? '<p class="muted">A carregar…</p>' : !games.length ? '<p class="muted">Ainda não há jogos terminados.</p>' :
+        games.map((g, i) => `<details style="margin:8px 0"><summary>Jogo ${games.length - i} · ${fmt(g.endedAt)} · ${dur(g.startedAt, g.endedAt)} · ${(g.rounds || []).length} rondas ·
+          paga <b>${esc(name(g.loser))}</b></summary>
+          <p class="muted" style="margin:8px 0 4px">Ordem de saída: ${[...(g.results || [])].sort((a, b) => a.place - b.place).map(r => `${r.place}.º ${esc(r.name)}`).join(' · ')}</p>
+          <div class="scroll"><table><tr><th>Ronda</th><th>Começou</th><th>Moedas</th><th>Palpites</th><th class="n">Total</th><th>Acertou</th><th>Duelo</th></tr>
+          ${(g.rounds || []).map(r => `<tr><td>${r.n}</td><td>${esc(name(r.starter))}</td>
+            <td>${Object.entries(r.coins || {}).map(([u, n]) => `${esc(name(u))} ${n}`).join(', ')}</td>
+            <td>${(r.guesses || []).map(x => `${esc(name(x.p))} ${x.n}`).join(', ')}</td>
+            <td class="n"><b>${r.total}</b></td><td>${r.winner ? `<span class="tag ok">${esc(name(r.winner))}</span>` : '<span class="muted">ninguém</span>'}</td>
+            <td>${r.duel ? Object.entries(r.duel).map(([u, n]) => `${esc(name(u))} ${n}`).join(' – ') : ''}</td></tr>`).join('')}
+          </table></div></details>`).join('')}
+    </div>`;
+}
+</script>
+</body>
+</html>
