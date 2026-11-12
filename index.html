@@ -55,6 +55,8 @@
   .duel{background:#0e2a1d;border:1px solid var(--gold-d);border-radius:12px;padding:10px;margin:0 0 12px;text-align:center}
   .duel .score{display:flex;align-items:center;justify-content:center;gap:12px;font-size:18px;margin-top:4px}
   .duel .score b{font-size:28px;color:var(--gold)}
+  .share{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:6px 0 10px}
+  .share button{width:auto;flex:1 1 30%;min-width:110px;padding:10px 8px;font-size:15px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
   .dot.off{background:var(--red)}
   .coins{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
@@ -118,7 +120,7 @@ const qs = new URLSearchParams(location.search);
 // Ligamo-nos a vários servidores ao mesmo tempo: basta um funcionar em todos os telemóveis.
 const BROKERS = qs.get('broker') ? qs.get('broker').split(',') : [
   'wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt' ];
-const VERSION = 'v6 · 2026-11-11';
+const VERSION = 'v7 · 2026-11-12';
 const TOPIC = 'jogo-moeda-v1';
 const T = c => ({ host: `${TOPIC}/${c}/h`, info: `${TOPIC}/${c}/info`, client: pid => `${TOPIC}/${c}/c/${pid}` });
 const log = (...a) => console.log('[moeda]', ...a);
@@ -127,7 +129,9 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 
 let myPid = LS.get('pid'); if (!myPid) { myPid = uid(); LS.set('pid', myPid); }
 let myName = LS.get('name') || '';
-let joinCode = '';
+// Convite por link: .../jogo-moeda/?mesa=ABCD
+const invited = (qs.get('mesa') || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4);
+let joinCode = invited.length === 4 ? invited : '';
 let role = null;          // null | 'host' | 'client'
 let view = null, code = null, statusMsg = '';
 let G = null;             // estado autoritativo (só no anfitrião)
@@ -577,6 +581,7 @@ function render(){
   bindTop();
   app.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
     const a = b.dataset.a, n = b.dataset.n !== undefined ? Number(b.dataset.n) : undefined;
+    if (a === 'share') { shareTable(b.dataset.k); return; }
     if (a === 'first') { send({ t: 'first', pid: b.dataset.pid }); return; }
     if (a === 'move') { send({ t: 'move', pid: b.dataset.pid, n }); return; }
     if (a === 'kick') { if (confirm('Remover ' + b.dataset.name + '?')) send({ t: 'kick', pid: b.dataset.pid }); return; }
@@ -596,16 +601,22 @@ function bindTop(){
 
 function renderHome(){
   const saved = LS.get('host');
+  const isInvite = invited.length === 4 && joinCode === invited;
+  const joinCard = `<div class="card"${isInvite ? ' style="border-color:var(--gold)"' : ''}>
+      <h2>${isInvite ? '🎟️ Foste convidado para a mesa ' + esc(invited) : 'Entrar num jogo'}</h2>
+      ${isInvite ? '<p class="muted" style="margin:0 0 10px">Escreve o teu nickname acima e carrega em Entrar.</p>' : ''}
+      <label for="cd">Código da sala</label>
+      <div class="row"><input id="cd" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD" value="${esc(joinCode)}"
+        style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button id="join" style="flex:0 0 110px">Entrar</button></div></div>`;
   app.innerHTML = `
     <h1>🪙 Jogo da Moeda</h1><p class="sub">Adivinha quantas moedas há em jogo</p>
     <div class="card"><label for="nm">O teu nickname</label>
       <input id="nm" maxlength="16" autocomplete="off" placeholder="ex.: Zé" value="${esc(myName)}">
       ${profile ? `<p class="muted" style="margin:10px 0 0;font-size:14px">O teu histórico: <b>${profile.tables}</b> mesa${profile.tables === 1 ? '' : 's'} · <b>${profile.games}</b> jogo${profile.games === 1 ? '' : 's'} · pagaste <b>${profile.paid}</b> · 1.º <b>${profile.first}</b></p>` : ''}</div>
-    <div class="card"><h2>Criar jogo</h2><button id="host">Criar sala</button>
+    ${isInvite ? joinCard : ''}
+    <div class="card"><h2>Criar jogo</h2><button ${isInvite ? 'class="sec" ' : ''}id="host">Criar sala</button>
       ${saved && saved.phase ? `<div class="gap"></div><button class="sec" id="resume">Retomar sala ${esc(saved.code)}</button>` : ''}</div>
-    <div class="card"><h2>Entrar num jogo</h2><label for="cd">Código da sala</label>
-      <div class="row"><input id="cd" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD" value="${esc(joinCode)}"
-        style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button id="join" style="flex:0 0 110px">Entrar</button></div></div>
+    ${isInvite ? '' : joinCard}
     <div class="card"><details><summary>Regras</summary><ol class="rules">
       <li>Cada jogador leva em segredo 0 a 3 moedas (na 1.ª ronda, pelo menos 1, exceto se a jornada começar só com 2 jogadores).</li>
       <li>À vez, cada um diz quantas moedas acha que há no total. Não se pode repetir um número já dito.</li>
@@ -623,11 +634,35 @@ function renderHome(){
   const r = document.getElementById('resume'); if (r) r.onclick = () => { if (needNameFb()) startHost(saved); };
   document.getElementById('join').onclick = () => {
     if (!needNameFb()) return; if (joinCode.length !== 4) return toast('O código tem 4 letras.'); joinGame(joinCode); };
+  if (isInvite && !nm.value) nm.focus();
 }
 
+function tableLink(){
+  const p = new URLSearchParams({ mesa: code });
+  if (qs.get('broker')) p.set('broker', qs.get('broker'));
+  return location.origin + location.pathname + '?' + p.toString();
+}
+async function copyText(t){
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); let ok = false; try { ok = document.execCommand('copy'); } catch {} ta.remove(); return ok;
+  }
+}
+async function shareTable(kind){
+  const link = tableLink(), text = '🪙 Jogo da Moeda: junta-te à mesa ' + code + '!';
+  if (kind === 'native' && navigator.share) {
+    try { await navigator.share({ title: 'Jogo da Moeda', text, url: link }); } catch (e) { if (e && e.name !== 'AbortError') toast('Não foi possível partilhar.'); }
+    return;
+  }
+  if (kind === 'wa') { window.open('https://wa.me/?text=' + encodeURIComponent(text + ' ' + link), '_blank', 'noopener'); return; }
+  toast(await copyText(link) ? 'Link copiado! Cola no grupo.' : 'Copia este link: ' + link);
+}
 function lobby(v, isHost){
   return `<div class="card center"><p class="muted" style="margin:0">Partilha o código com a mesa</p>
     <div class="big" style="letter-spacing:8px">${esc(v.code)}</div>
+    <div class="share">${navigator.share ? '<button class="sec" data-a="share" data-k="native">📤 Partilhar</button>' : ''}
+      <button class="sec" data-a="share" data-k="wa">💬 WhatsApp</button><button class="sec" data-a="share" data-k="copy">🔗 Copiar link</button></div>
     <p class="muted">${v.players.length} jogador${v.players.length === 1 ? '' : 'es'} na sala</p>
     ${isHost ? `<button data-a="start" ${v.players.length < 2 ? 'disabled' : ''}>Começar jogo</button>`
              : `<p>À espera que o anfitrião comece…</p>`}
